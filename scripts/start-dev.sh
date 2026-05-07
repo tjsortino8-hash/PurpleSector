@@ -9,9 +9,17 @@
 #   3. Demo replay binary build (if needed)
 #   4. PM2 services (Vite frontend + Django API + demo replay)
 #
-# Usage: ./scripts/start-dev.sh
+# Usage: ./scripts/start-dev.sh [--install]
+#   --install   Run npm install before starting PM2 services
 
 set -e
+
+INSTALL_DEPS=false
+for arg in "$@"; do
+  case "$arg" in
+    --install) INSTALL_DEPS=true ;;
+  esac
+done
 
 echo "🚀 Starting Purple Sector Development Environment"
 echo ""
@@ -98,7 +106,38 @@ echo -e "${YELLOW}⏳ Applying Postgres SQL migrations...${NC}"
 ./scripts/init-postgres.sh
 echo -e "${GREEN}✓ Postgres SQL migrations applied${NC}"
 
-# ── Step 3b: Django migrations ────────────────────────────────────────
+# ── Step 3b: Python venv setup ────────────────────────────────────────
+if [ ! -f "apps/web/.venv/bin/uvicorn" ]; then
+  echo -e "${YELLOW}⏳ Setting up Python virtual environment...${NC}"
+
+  # Ensure uv is available; install it if not
+  if ! command -v uv > /dev/null 2>&1; then
+    echo -e "${YELLOW}  uv not found — installing via pip...${NC}"
+    python3 -m pip install --user uv
+    # Reload PATH so the newly installed uv is visible
+    export PATH="$HOME/.local/bin:$PATH"
+  fi
+
+  if command -v uv > /dev/null 2>&1; then
+    (cd apps/web && uv venv && uv pip install -e '.[ai]')
+  else
+    echo -e "${YELLOW}  uv still unavailable — falling back to venv + pip...${NC}"
+    python3 -m venv apps/web/.venv
+    apps/web/.venv/bin/pip install --quiet --upgrade pip
+    apps/web/.venv/bin/pip install --quiet -e 'apps/web[ai]'
+  fi
+
+  if [ ! -f "apps/web/.venv/bin/uvicorn" ]; then
+    echo -e "${RED}❌ Failed to set up Python venv — uvicorn still missing.${NC}"
+    echo -e "${RED}   Try manually: cd apps/web && uv venv && uv pip install -e '.[ai]'${NC}"
+    exit 1
+  fi
+  echo -e "${GREEN}✓ Python virtual environment ready${NC}"
+else
+  echo -e "${GREEN}✓ Python virtual environment already set up${NC}"
+fi
+
+# ── Step 3c: Django migrations ────────────────────────────────────────
 if [ -d "apps/web/.venv" ]; then
   echo -e "${YELLOW}⏳ Running Django migrations...${NC}"
   (cd apps/web && .venv/bin/python manage.py migrate --run-syncdb 2>&1 | tail -5)
@@ -112,52 +151,7 @@ if [ -d "apps/web/.venv" ]; then
   # This must run AFTER Django migrations because the sink validates that
   # the target table (laps) exists in Postgres.
   echo -e "${YELLOW}⏳ Creating RisingWave sink to Postgres...${NC}"
-  (cd apps/web && .venv/bin/python -c "
-import psycopg2
-import time
-for i in range(10):
-    try:
-        conn = psycopg2.connect(host='localhost', port=4566, user='root', dbname='dev', connect_timeout=5)
-        break
-    except:
-        time.sleep(1)
-        if i == 9:
-            print('⚠ Could not connect to RisingWave, skipping sink creation')
-            exit(0)
-cur = conn.cursor()
-
-# Check if sink already exists
-cur.execute(\"SHOW SINKS;\")
-sinks = [r[0] for r in cur.fetchall()]
-if 'public.laps_postgres_upsert' in sinks or 'laps_postgres_upsert' in sinks:
-    print('✓ Sink already exists')
-    conn.close()
-    exit(0)
-
-# Create the sink
-try:
-    cur.execute('''
-CREATE SINK IF NOT EXISTS laps_postgres_upsert
-FROM completed_laps
-WITH (
-  connector = \"jdbc\",
-  jdbc.url = \"jdbc:postgresql://postgres:5432/purplesector\",
-  user = \"purplesector\",
-  password = \"devpassword\",
-  table.name = \"laps\",
-  type = \"append-only\",
-  force_append_only = \"true\"
-);
-''')
-    conn.commit()
-    print('✓ RisingWave sink created')
-except Exception as e:
-    print(f\"⚠ Failed to create sink: {e}\")
-conn.close()
-" 2>&1)
-else
-  echo -e "${YELLOW}⚠ Django venv not found at apps/web/.venv — skipping migrations${NC}"
-  echo -e "${YELLOW}  Run: cd apps/web && uv venv && uv pip install -e '.[ai]'${NC}"
+  (cd apps/web && .venv/bin/python ../../scripts/create-rw-sink.py 2>&1)
 fi
 
 # ── Step 6: Build demo replay binary ───────────────────────────────────
@@ -170,7 +164,14 @@ else
   echo -e "${GREEN}✓ Demo replay binary exists${NC}"
 fi
 
-# ── Step 7: PM2 services ──────────────────────────────────────────────
+# ── Step 7: Node dependencies ─────────────────────────────────────────
+if [ "$INSTALL_DEPS" = true ]; then
+  echo -e "${YELLOW}⏳ Installing Node dependencies (npm install)...${NC}"
+  npm install
+  echo -e "${GREEN}✓ Node dependencies installed${NC}"
+fi
+
+# ── Step 8: PM2 services ──────────────────────────────────────────────
 
 mkdir -p logs
 
