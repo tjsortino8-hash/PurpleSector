@@ -21,6 +21,7 @@ use tracing::{debug, info, warn};
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
     pub disabled: bool,
+    pub dev_user_id: Option<String>,
     pub issuer_url: Option<String>,
     pub audience: Option<String>,
     pub jwks_url: Option<String>,
@@ -34,6 +35,7 @@ impl AuthConfig {
 
         Self {
             disabled,
+            dev_user_id: std::env::var("DEV_USER_ID").ok(),
             issuer_url: std::env::var("AUTH_ISSUER_URL").ok(),
             audience: std::env::var("AUTH_AUDIENCE").ok(),
             jwks_url: std::env::var("AUTH_JWKS_URL").ok(),
@@ -130,8 +132,9 @@ impl JwtValidator {
     /// Validate a JWT token and return the claims.
     pub async fn validate(&self, token: &str) -> Result<TokenClaims> {
         if self.config.disabled {
+            let sub = self.config.dev_user_id.clone().unwrap_or_else(|| "dev-user".into());
             return Ok(TokenClaims {
-                sub: Some("dev-user".into()),
+                sub: Some(sub),
                 aud: None,
                 iss: None,
                 exp: None,

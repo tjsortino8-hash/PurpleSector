@@ -72,6 +72,7 @@ services:
       KAFKA_TOPIC: telemetry-batches
       GRPC_PORT: "50051"
       AUTH_DISABLED: "true"
+      DEV_USER_ID: ${DEV_USER_ID:-dev-user}
       RUST_LOG: info,ps_grpc_gateway=debug
     restart: unless-stopped
     healthcheck:
