@@ -210,53 +210,50 @@ pub async fn run_transport(
         }
 
         // ── Live streaming loop ───────────────────────────────────────
-        // Collect a small window of batches and send them as a single stream.
-        // This amortises gRPC overhead while keeping latency low.
-        loop {
-            // Collect up to drain_batch_size batches or whatever is ready
-            let mut pending: Vec<TelemetryBatch> = Vec::new();
+        // Pipeline up to MAX_INFLIGHT concurrent RPCs so a slow gateway
+        // round-trip doesn't stall incoming batches.
+        const MAX_INFLIGHT: usize = 8;
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT));
+        let (err_tx, mut err_rx) = tokio::sync::mpsc::channel::<()>(1);
 
-            // Block until at least one batch arrives
-            match batch_rx.recv().await {
-                Some(batch) => pending.push(batch),
+        loop {
+            // Check if any inflight RPC reported an error
+            if err_rx.try_recv().is_ok() {
+                warn!("Gateway send failed, reconnecting...");
+                continue 'outer;
+            }
+
+            let batch = match batch_rx.recv().await {
+                Some(b) => b,
                 None => {
-                    // batch_rx closed — pipeline shutting down
-                    info!("Batch channel closed, flushing remaining batches...");
-                    if !pending.is_empty() {
-                        let stream = tokio_stream::iter(pending.into_iter());
-                        let _ = client.stream_telemetry(stream).await;
-                    }
+                    info!("Batch channel closed, shutting down transport...");
                     wal_tx.send(WalCmd::Shutdown).await.ok();
                     return Ok(());
                 }
-            }
+            };
 
-            // Drain any additional batches already queued (non-blocking)
-            loop {
-                match batch_rx.try_recv() {
-                    Ok(batch) => {
-                        pending.push(batch);
-                        if pending.len() >= config.drain_batch_size { break; }
-                    }
-                    Err(_) => break,
-                }
-            }
+            // Acquire a slot — blocks if MAX_INFLIGHT are already in flight
+            let permit = match sem.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => break,
+            };
 
-            let count = pending.len();
-            let stream = tokio_stream::iter(pending.into_iter());
-            match client.stream_telemetry(stream).await {
-                Ok(resp) => {
-                    let ack = resp.into_inner();
-                    info!("Gateway ACK: {} batches, {} samples", ack.batches_received, ack.samples_received);
-                    if let Some(r) = &config.wal_depth_reporter {
-                        r.store(0, Ordering::Relaxed);
+            let mut c = client.clone();
+            let err_tx = err_tx.clone();
+            tokio::spawn(async move {
+                let _permit = permit;
+                let stream = tokio_stream::iter(std::iter::once(batch));
+                match c.stream_telemetry(stream).await {
+                    Ok(resp) => {
+                        let ack = resp.into_inner();
+                        debug!("Gateway ACK: {} batches, {} samples", ack.batches_received, ack.samples_received);
+                    }
+                    Err(e) => {
+                        warn!("Gateway RPC error: {e:#}");
+                        let _ = err_tx.try_send(());
                     }
                 }
-                Err(e) => {
-                    warn!("Gateway send failed ({count} batches, error={e:#}), reconnecting...");
-                    continue 'outer;
-                }
-            }
+            });
         }
     }
 }
