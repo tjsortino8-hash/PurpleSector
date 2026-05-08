@@ -130,11 +130,16 @@ pub fn spawn_batch_assembler(
 
         loop {
             tokio::select! {
-                Some(sample) = sample_rx.recv() => {
-                    if let Some(batch) = assembler.push(sample) {
-                        if batch_tx.send(batch).await.is_err() {
-                            break; // Receiver dropped
+                result = sample_rx.recv() => {
+                    match result {
+                        Some(sample) => {
+                            if let Some(batch) = assembler.push(sample) {
+                                if batch_tx.send(batch).await.is_err() {
+                                    break; // Receiver dropped
+                                }
+                            }
                         }
+                        None => break, // sample_tx dropped — shutdown chain
                     }
                 }
                 _ = tokio::time::sleep(flush_interval) => {
@@ -145,7 +150,6 @@ pub fn spawn_batch_assembler(
                         }
                     }
                 }
-                else => break,
             }
         }
 
