@@ -28,6 +28,9 @@ reqwest = { version = "0.12", features = ["json"] }
 # Kafka-compatible producer (for Redpanda)
 rdkafka = { version = "0.36", features = ["cmake-build"] }
 
+# Async combinators
+futures = "0.3"
+
 # Redis for live telemetry streams
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 
