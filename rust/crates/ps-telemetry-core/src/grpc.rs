@@ -157,7 +157,15 @@ pub async fn run_transport(
                 Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     info!("Batch channel closed, draining WAL...");
-                    drain_wal(&config, &wal_tx).await?;
+                    let drain = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        drain_wal(&config, &wal_tx),
+                    );
+                    match drain.await {
+                        Ok(Ok(n)) => info!("Drained {n} batches on shutdown"),
+                        Ok(Err(e)) => warn!("Drain on shutdown failed: {e}"),
+                        Err(_) => warn!("Drain on shutdown timed out"),
+                    }
                     wal_tx.send(WalCmd::Shutdown).await.ok();
                     return Ok(());
                 }
@@ -188,8 +196,27 @@ pub async fn run_transport(
 
         // Wait for more batches or a short poll interval
         tokio::select! {
-            Some(batch) = batch_rx.recv() => {
-                wal_tx.send(WalCmd::Push(batch)).await.ok();
+            result = batch_rx.recv() => {
+                match result {
+                    Some(batch) => {
+                        wal_tx.send(WalCmd::Push(batch)).await.ok();
+                    }
+                    None => {
+                        // Channel closed — flush WAL with a timeout and exit
+                        info!("Batch channel closed, draining WAL...");
+                        let drain = tokio::time::timeout(
+                            Duration::from_secs(2),
+                            drain_wal(&config, &wal_tx),
+                        );
+                        match drain.await {
+                            Ok(Ok(n)) => info!("Drained {n} batches on shutdown"),
+                            Ok(Err(e)) => warn!("Drain on shutdown failed: {e}"),
+                            Err(_) => warn!("Drain on shutdown timed out"),
+                        }
+                        wal_tx.send(WalCmd::Shutdown).await.ok();
+                        return Ok(());
+                    }
+                }
             }
             _ = tokio::time::sleep(Duration::from_millis(100)) => {}
         }
