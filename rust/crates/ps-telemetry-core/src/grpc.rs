@@ -219,9 +219,15 @@ pub async fn run_transport(
         // Spawn the RPC call — it reads from batch_stream until stream_tx is dropped.
         let rpc_handle = tokio::spawn({
             let mut c = client.clone();
-            async move { c.stream_telemetry(batch_stream).await }
+            async move {
+                let result = c.stream_telemetry(batch_stream).await;
+                info!("Persistent stream RPC ended: {:?}", result.as_ref().map(|_| "ok").unwrap_or("err"));
+                result
+            }
         });
 
+        info!("Entering live streaming loop");
+        let mut batch_count: u64 = 0;
         loop {
             let batch = match batch_rx.recv().await {
                 Some(b) => b,
@@ -234,10 +240,15 @@ pub async fn run_transport(
                 }
             };
 
+            batch_count += 1;
+            if batch_count <= 3 || batch_count % 50 == 0 {
+                info!("Forwarding batch #{batch_count} to gateway stream");
+            }
+
             // Forward batch into the persistent stream
             if stream_tx.send(batch).await.is_err() {
                 // stream_rx dropped — RPC ended (gateway closed or error)
-                warn!("Gateway stream closed, reconnecting...");
+                warn!("Gateway stream closed after {batch_count} batches, reconnecting...");
                 continue 'outer;
             }
 
