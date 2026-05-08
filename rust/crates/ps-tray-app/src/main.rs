@@ -97,6 +97,7 @@ fn main() -> Result<()> {
     let config_clone = config.clone();
     let stats_clone = stats.clone();
     let running_clone = running.clone();
+    let egui_ctx_pipeline = egui_ctx.clone();
     let rt_handle = std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
         rt.block_on(pipeline::run_pipeline_manager(
@@ -104,6 +105,7 @@ fn main() -> Result<()> {
             stats_clone,
             running_clone,
             cmd_rx,
+            egui_ctx_pipeline,
         ));
     });
 

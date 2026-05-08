@@ -15,6 +15,7 @@ use ps_telemetry_core::capture::demo::{DemoConfig, DemoSource};
 use ps_telemetry_core::capture::{CaptureConfig, TelemetrySource};
 use ps_telemetry_core::grpc::{self, GrpcConfig};
 
+use eframe::egui;
 use crate::config::{AppConfig, SimType};
 use crate::stats::PipelineStats;
 
@@ -34,6 +35,7 @@ pub async fn run_pipeline_manager(
     stats: PipelineStats,
     running: Arc<AtomicBool>,
     mut cmd_rx: mpsc::Receiver<PipelineCommand>,
+    egui_ctx: Arc<std::sync::OnceLock<egui::Context>>,
 ) {
     // Handle to the currently running pipeline task
     let mut pipeline_handle: Option<tokio::task::JoinHandle<()>> = None;
@@ -55,6 +57,7 @@ pub async fn run_pipeline_manager(
                 let cfg = config.lock().unwrap().clone();
                 let stats_clone = stats.clone();
                 let running_clone = running.clone();
+                let egui_ctx_clone = egui_ctx.clone();
 
                 pipeline_handle = Some(tokio::spawn(async move {
                     running_clone.store(true, Ordering::Relaxed);
@@ -62,6 +65,9 @@ pub async fn run_pipeline_manager(
                         error!("Pipeline error: {e:#}");
                     }
                     running_clone.store(false, Ordering::Relaxed);
+                    if let Some(ctx) = egui_ctx_clone.get() {
+                        ctx.request_repaint();
+                    }
                     info!("Pipeline stopped");
                 }));
             }
@@ -70,11 +76,17 @@ pub async fn run_pipeline_manager(
                 if let Some(tx) = shutdown_tx.take() {
                     let _ = tx.send(()).await;
                 }
-                // Do not await the handle here — the spawned task will set
-                // running = false once it exits, keeping the command loop
-                // unblocked so the GUI can reflect the stopped state promptly
-                // and accept a Start command immediately.
-                drop(pipeline_handle.take());
+                // Await the handle so running_clone.store(false) executes
+                // before we return, ensuring the GUI sees the stopped state.
+                // The shutdown signal above unblocks capture_loop immediately
+                // so this await completes quickly.
+                if let Some(handle) = pipeline_handle.take() {
+                    let _ = handle.await;
+                }
+                running.store(false, Ordering::Relaxed);
+                if let Some(ctx) = egui_ctx.get() {
+                    ctx.request_repaint();
+                }
             }
             Some(PipelineCommand::ReloadConfig) => {
                 info!("Config reloaded — restart pipeline to apply changes");
