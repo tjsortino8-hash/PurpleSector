@@ -192,7 +192,7 @@ pub async fn run_transport(
             match client.stream_telemetry(stream).await {
                 Ok(resp) => {
                     let ack = resp.into_inner();
-                    debug!("WAL drain ACK: {} batches, {} samples", ack.batches_received, ack.samples_received);
+                    info!("WAL drain ACK: {} batches, {} samples", ack.batches_received, ack.samples_received);
                     wal_tx.send(WalCmd::AckUpTo(max_id)).await.ok();
                     if let Some(r) = &config.wal_depth_reporter {
                         let (d_tx, d_rx) = tokio::sync::oneshot::channel();
@@ -247,15 +247,13 @@ pub async fn run_transport(
             match client.stream_telemetry(stream).await {
                 Ok(resp) => {
                     let ack = resp.into_inner();
-                    debug!("Gateway ACK: {} batches, {} samples", ack.batches_received, ack.samples_received);
+                    info!("Gateway ACK: {} batches, {} samples", ack.batches_received, ack.samples_received);
                     if let Some(r) = &config.wal_depth_reporter {
                         r.store(0, Ordering::Relaxed);
                     }
                 }
                 Err(e) => {
-                    warn!("Gateway send failed ({count} batches lost to WAL): {e}, reconnecting...");
-                    // Can't recover these batches easily — log and reconnect.
-                    // Future: push to WAL before sending for full durability.
+                    warn!("Gateway send failed ({count} batches, error={e:#}), reconnecting...");
                     continue 'outer;
                 }
             }
