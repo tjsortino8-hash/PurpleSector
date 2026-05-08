@@ -239,12 +239,19 @@ async fn capture_loop(
     stats: &PipelineStats,
     shutdown_rx: &mut mpsc::Receiver<()>,
 ) {
+    let mut sample_count: u64 = 0;
+    let mut last_log = std::time::Instant::now();
     loop {
         tokio::select! {
             result = source.next_sample() => {
                 match result {
                     Ok(sample) => {
                         stats.inc_samples();
+                        sample_count += 1;
+                        if last_log.elapsed() >= std::time::Duration::from_secs(5) {
+                            info!("Capture: {} samples received so far", sample_count);
+                            last_log = std::time::Instant::now();
+                        }
                         if sample_tx.send(sample).await.is_err() {
                             info!("Batch channel closed, stopping capture");
                             break;
@@ -257,7 +264,7 @@ async fn capture_loop(
                 }
             }
             _ = shutdown_rx.recv() => {
-                info!("Shutdown signal received");
+                info!("Shutdown signal received, {} total samples captured", sample_count);
                 break;
             }
         }
