@@ -65,32 +65,37 @@ impl TelemetryGatewayService {
         }
     }
 
-    /// Unnest a batch and publish individual frames immediately.
-    /// Frames are published as fast as possible to minimize latency.
+    /// Unnest a batch and publish all frames concurrently to Kafka.
     /// Key is user_id:source - RisingWave will assign sessions.
     async fn publish_frames_at_rate(&self, batch: TelemetryBatch) -> Result<(), anyhow::Error> {
         let key = format!("{}:{}", batch.user_id, batch.source);
         let frame_count = batch.samples.len();
-        
+
         debug!(
-            "Publishing {} frames immediately (source={}, rate={}Hz)",
+            "Publishing {} frames (source={}, rate={}Hz)",
             frame_count, batch.source, batch.source_rate_hz
         );
 
-        for frame in batch.samples {
-            let envelope = TelemetryEnvelope {
+        // Encode all frames first (synchronous)
+        let payloads: Vec<Vec<u8>> = batch.samples.into_iter().map(|frame| {
+            TelemetryEnvelope {
                 user_id: batch.user_id.clone(),
                 source: batch.source.clone(),
                 source_rate_hz: batch.source_rate_hz,
                 frame: Some(frame),
-            };
+            }.encode_to_vec()
+        }).collect();
 
-            let payload = envelope.encode_to_vec();
+        // Publish all frames concurrently — one Kafka round-trip instead of N serial
+        let futures: Vec<_> = payloads.iter().map(|payload| {
             let record = FutureRecord::to(&self.topic)
-                .key(&key)
-                .payload(&payload);
+                .key(key.as_str())
+                .payload(payload.as_slice());
+            self.producer.send(record, Duration::from_secs(5))
+        }).collect();
 
-            if let Err((e, _)) = self.producer.send(record, Duration::from_secs(5)).await {
+        for result in futures::future::join_all(futures).await {
+            if let Err((e, _)) = result {
                 return Err(anyhow::anyhow!("Kafka publish failed: {e}"));
             }
         }
@@ -125,11 +130,21 @@ impl TelemetryIngress for TelemetryGatewayService {
         let mut batches_received: u64 = 0;
         let mut frames_published: u64 = 0;
 
-        while let Some(batch) = stream.message().await.map_err(|e| {
+        while let Some(mut batch) = stream.message().await.map_err(|e| {
             Status::internal(format!("Stream error: {e}"))
         })? {
             let batch_size = batch.batch_size;
             let actual_samples = batch.samples.len();
+
+            // Override user_id with the authenticated identity so it matches
+            // what Django registered in active_sessions (UUID, not username).
+            batch.user_id = user_id.clone();
+
+            // Normalize source: live collector sends "session-<hex>" but
+            // active_sessions has "live" — rewrite any non-demo source to "live".
+            if batch.source != "demo" {
+                batch.source = "live".to_string();
+            }
 
             debug!(
                 "Received batch: user={}, source={}, rate={}Hz, samples={}",
