@@ -136,9 +136,13 @@ impl TelemetryIngress for TelemetryGatewayService {
             let batch_size = batch.batch_size;
             let actual_samples = batch.samples.len();
 
-            // Override user_id with the authenticated identity so it matches
-            // what Django registered in active_sessions (UUID, not username).
-            batch.user_id = user_id.clone();
+            // In prod the JWT-derived user_id always wins.
+            // In dev (auth disabled) with no DEV_USER_ID set, trust the
+            // user_id the tray app sent in the batch — no server-side config needed.
+            if !self.validator.config.disabled || self.validator.config.dev_user_id.is_some() {
+                batch.user_id = user_id.clone();
+            }
+            // else: auth disabled + no DEV_USER_ID → keep batch.user_id as-is
 
             // Normalize source: live collector sends "session-<hex>" but
             // active_sessions has "live" — rewrite any non-demo source to "live".

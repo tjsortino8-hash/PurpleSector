@@ -140,10 +140,10 @@ async fn run_pipeline(
 ) -> anyhow::Result<()> {
     let batch_config = BatchConfig {
         flush_interval: Duration::from_millis(config.batch_interval_ms),
-        user_id: if config.username.is_empty() {
+        user_id: if config.user_id.is_empty() {
             "anonymous".into()
         } else {
-            config.username.clone()
+            config.user_id.clone()
         },
         source: format!("session-{}", chrono_session_id()),
         source_rate_hz: match config.sim_type {

@@ -49,8 +49,10 @@ pub struct AppConfig {
     /// gRPC gateway endpoint URL.
     pub grpc_endpoint: String,
 
-    /// Username (placeholder for auth).
-    pub username: String,
+    /// User ID — the UUID that identifies this user in the backend.
+    /// Set this to match your Django user UUID.
+    #[serde(alias = "username")]
+    pub user_id: String,
 
     /// Password (placeholder — will be replaced by OIDC flow).
     #[serde(default)]
@@ -81,7 +83,7 @@ impl Default for AppConfig {
         Self {
             sim_type: SimType::AssettoCorsaSS,
             grpc_endpoint: "http://localhost:50051".into(),
-            username: String::new(),
+            user_id: String::new(),
             password: String::new(),
             acc_connection_password: String::new(),
             acc_update_interval_ms: default_acc_update_interval(),

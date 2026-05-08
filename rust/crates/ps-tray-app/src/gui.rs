@@ -36,7 +36,7 @@ pub struct AppWindow {
     // Editable settings (buffered until Save)
     edit_sim: SimType,
     edit_endpoint: String,
-    edit_username: String,
+    edit_user_id: String,
     edit_password: String,
     edit_acc_password: String,
     edit_acc_interval: String,
@@ -52,7 +52,7 @@ impl AppWindow {
             active_view: View::Stats,
             edit_sim: config.sim_type,
             edit_endpoint: config.grpc_endpoint.clone(),
-            edit_username: config.username.clone(),
+            edit_user_id: config.user_id.clone(),
             edit_password: config.password.clone(),
             edit_acc_password: config.acc_connection_password.clone(),
             edit_acc_interval: config.acc_update_interval_ms.to_string(),
@@ -192,8 +192,8 @@ impl AppWindow {
         // ── Credentials ──
         ui.label(egui::RichText::new("Login").strong());
         ui.horizontal(|ui| {
-            ui.label("Username:");
-            ui.text_edit_singleline(&mut self.edit_username);
+            ui.label("User ID:");
+            ui.text_edit_singleline(&mut self.edit_user_id);
         });
         ui.horizontal(|ui| {
             ui.label("Password:");
@@ -258,7 +258,7 @@ impl AppWindow {
         let mut config = self.state.config.lock().unwrap();
         config.sim_type = self.edit_sim;
         config.grpc_endpoint = self.edit_endpoint.clone();
-        config.username = self.edit_username.clone();
+        config.user_id = self.edit_user_id.clone();
         config.password = self.edit_password.clone();
         config.acc_connection_password = self.edit_acc_password.clone();
         config.acc_update_interval_ms = self
@@ -294,7 +294,7 @@ impl AppWindow {
         let config = self.state.config.lock().unwrap().clone();
         self.edit_sim = config.sim_type;
         self.edit_endpoint = config.grpc_endpoint;
-        self.edit_username = config.username;
+        self.edit_user_id = config.user_id;
         self.edit_password = config.password;
         self.edit_acc_password = config.acc_connection_password;
         self.edit_acc_interval = config.acc_update_interval_ms.to_string();
