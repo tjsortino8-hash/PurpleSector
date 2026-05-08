@@ -380,6 +380,7 @@ export default function SessionDetailPage() {
             return;
           }
           currentLapFramesRef.current.push(frame);
+          currentLapFramesRef.current.sort((a, b) => a.lapTime - b.lapTime);
           const now = Date.now();
           const isFirstFrame = currentLapFramesRef.current.length === 1;
           if ((isFirstFrame || now - lastUpdateTimeRef.current >= 67) && isMountedRef.current) {
@@ -675,7 +676,7 @@ export default function SessionDetailPage() {
               </div>
             </div>
 
-            {session.status === 'active' && (
+            {(session.status === 'active' || session.status === 'pending') && (
               <div className="flex items-center gap-2">
                 {!session.started && (
                   <Button
@@ -688,7 +689,7 @@ export default function SessionDetailPage() {
                     Start Session
                   </Button>
                 )}
-                {session.started && (
+                {session.started && session.status === 'active' && (
                   <Button
                     variant={isPaused ? 'default' : 'outline'}
                     onClick={togglePause}
@@ -714,7 +715,7 @@ export default function SessionDetailPage() {
               </div>
             )}
 
-            {session.status !== 'active' && (
+            {session.status !== 'active' && session.status !== 'pending' && (
               <div className="flex items-center gap-2">
                 <Button
                   variant="destructive"
@@ -731,8 +732,8 @@ export default function SessionDetailPage() {
       </header>
 
       <main className="container mx-auto px-4 py-6">
-        <div className={`grid grid-cols-1 ${session.status === 'active' ? 'lg:grid-cols-3' : 'lg:grid-cols-1'} gap-6`}>
-          {session.status === 'active' && (
+        <div className={`grid grid-cols-1 ${session.status === 'active' || session.status === 'pending' ? 'lg:grid-cols-3' : 'lg:grid-cols-1'} gap-6`}>
+          {(session.status === 'active' || session.status === 'pending') && (
             <div className="lg:col-span-2 space-y-6">
               {!session.started && (
                 <Card className="border-blue-200 bg-blue-50 dark:bg-blue-950/30 dark:border-blue-800">

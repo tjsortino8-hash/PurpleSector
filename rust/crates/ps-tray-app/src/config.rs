@@ -73,7 +73,7 @@ fn default_acc_update_interval() -> u32 {
     100
 }
 fn default_batch_interval_ms() -> u64 {
-    500
+    100
 }
 
 impl Default for AppConfig {

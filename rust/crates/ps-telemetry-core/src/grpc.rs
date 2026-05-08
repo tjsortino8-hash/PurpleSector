@@ -210,19 +210,10 @@ pub async fn run_transport(
         }
 
         // ── Live streaming loop ───────────────────────────────────────
-        // Pipeline up to MAX_INFLIGHT concurrent RPCs so a slow gateway
-        // round-trip doesn't stall incoming batches.
-        const MAX_INFLIGHT: usize = 8;
-        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT));
-        let (err_tx, mut err_rx) = tokio::sync::mpsc::channel::<()>(1);
-
+        // Sequential sends preserve batch order in Kafka and Iceberg.
+        // With a 100ms flush interval each RPC carries ~1 sample and
+        // completes in <50ms, so head-of-line blocking is not a concern.
         loop {
-            // Check if any inflight RPC reported an error
-            if err_rx.try_recv().is_ok() {
-                warn!("Gateway send failed, reconnecting...");
-                continue 'outer;
-            }
-
             let batch = match batch_rx.recv().await {
                 Some(b) => b,
                 None => {
@@ -232,28 +223,20 @@ pub async fn run_transport(
                 }
             };
 
-            // Acquire a slot — blocks if MAX_INFLIGHT are already in flight
-            let permit = match sem.clone().acquire_owned().await {
-                Ok(p) => p,
-                Err(_) => break,
-            };
-
-            let mut c = client.clone();
-            let err_tx = err_tx.clone();
-            tokio::spawn(async move {
-                let _permit = permit;
-                let stream = tokio_stream::iter(std::iter::once(batch));
-                match c.stream_telemetry(stream).await {
-                    Ok(resp) => {
-                        let ack = resp.into_inner();
-                        debug!("Gateway ACK: {} batches, {} samples", ack.batches_received, ack.samples_received);
-                    }
-                    Err(e) => {
-                        warn!("Gateway RPC error: {e:#}");
-                        let _ = err_tx.try_send(());
+            let stream = tokio_stream::iter(std::iter::once(batch));
+            match client.stream_telemetry(stream).await {
+                Ok(resp) => {
+                    let ack = resp.into_inner();
+                    debug!("Gateway ACK: {} batches, {} samples", ack.batches_received, ack.samples_received);
+                    if let Some(r) = &config.wal_depth_reporter {
+                        r.store(0, Ordering::Relaxed);
                     }
                 }
-            });
+                Err(e) => {
+                    warn!("Gateway send failed (error={e:#}), reconnecting...");
+                    continue 'outer;
+                }
+            }
         }
     }
 }
