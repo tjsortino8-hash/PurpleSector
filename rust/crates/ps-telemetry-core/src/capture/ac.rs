@@ -52,7 +52,8 @@ impl AcSource {
             .target_host
             .as_deref()
             .unwrap_or("127.0.0.1");
-        let addr: SocketAddr = format!("{}:{}", target, self.config.udp_port).parse().map_err(
+        let game_port = self.config.target_port.unwrap_or(9996);
+        let addr: SocketAddr = format!("{}:{}", target, game_port).parse().map_err(
             |e| CaptureError::HandshakeFailed(format!("Invalid target address: {e}")),
         )?;
 
@@ -79,7 +80,8 @@ impl AcSource {
                 .target_host
                 .as_deref()
                 .unwrap_or("127.0.0.1");
-            if let Ok(addr) = format!("{}:{}", target, self.config.udp_port).parse::<SocketAddr>() {
+            let game_port = self.config.target_port.unwrap_or(9996);
+            if let Ok(addr) = format!("{}:{}", target, game_port).parse::<SocketAddr>() {
                 let pkt = Self::build_handshake_packet(0, 1, OP_DISMISS);
                 let _ = socket.send_to(&pkt, addr).await;
                 debug!("AC dismiss sent");

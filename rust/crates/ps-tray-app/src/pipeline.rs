@@ -70,24 +70,26 @@ pub async fn run_pipeline_manager(
                 if let Some(tx) = shutdown_tx.take() {
                     let _ = tx.send(()).await;
                 }
-                if let Some(handle) = pipeline_handle.take() {
-                    let _ = handle.await;
-                }
-                running.store(false, Ordering::Relaxed);
+                // Do not await the handle here — the spawned task will set
+                // running = false once it exits, keeping the command loop
+                // unblocked so the GUI can reflect the stopped state promptly
+                // and accept a Start command immediately.
+                drop(pipeline_handle.take());
             }
             Some(PipelineCommand::ReloadConfig) => {
                 info!("Config reloaded — restart pipeline to apply changes");
-                // If running, stop and restart
+                // If running, stop the old pipeline and restart with new config
                 if running.load(Ordering::Relaxed) {
                     if let Some(tx) = shutdown_tx.take() {
                         let _ = tx.send(()).await;
                     }
+                    // Wait for old task to finish before spawning a new one
                     if let Some(handle) = pipeline_handle.take() {
                         let _ = handle.await;
                     }
                     running.store(false, Ordering::Relaxed);
 
-                    // Restart
+                    // Restart with updated config
                     let (stop_tx, stop_rx) = mpsc::channel(1);
                     shutdown_tx = Some(stop_tx);
 

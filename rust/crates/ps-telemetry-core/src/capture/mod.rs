@@ -30,20 +30,25 @@ pub enum CaptureError {
 /// Configuration for a telemetry capture source.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CaptureConfig {
-    /// UDP port to listen on (or connect to).
+    /// Local UDP port to bind and receive on.
     pub udp_port: u16,
     /// UDP bind address.
     pub udp_host: String,
     /// Target host for games that require a handshake (e.g., AC).
     pub target_host: Option<String>,
+    /// Target port on the game machine. Defaults to the game's standard port
+    /// (9996 for AC, 9000 for ACC). Kept separate from udp_port so the local
+    /// receive socket does not conflict with the game's own listener.
+    pub target_port: Option<u16>,
 }
 
 impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
-            udp_port: 9996,
+            udp_port: 9997,
             udp_host: "0.0.0.0".into(),
             target_host: None,
+            target_port: Some(9996),
         }
     }
 }

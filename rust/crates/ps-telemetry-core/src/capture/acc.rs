@@ -46,9 +46,10 @@ impl Default for AccCaptureConfig {
     fn default() -> Self {
         Self {
             base: CaptureConfig {
-                udp_port: 9000,
+                udp_port: 20582,
                 udp_host: "0.0.0.0".into(),
                 target_host: Some("127.0.0.1".into()),
+                target_port: None,
             },
             broadcast_port: 9000,
             display_name: "PurpleSector".into(),
