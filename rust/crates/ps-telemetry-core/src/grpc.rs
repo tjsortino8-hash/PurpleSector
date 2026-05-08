@@ -210,32 +210,39 @@ pub async fn run_transport(
         }
 
         // ── Live streaming loop ───────────────────────────────────────
-        // Sequential sends preserve batch order in Kafka and Iceberg.
-        // With a 100ms flush interval each RPC carries ~1 sample and
-        // completes in <50ms, so head-of-line blocking is not a concern.
+        // One persistent HTTP/2 client-streaming RPC for the lifetime of
+        // the connection. Batches are forwarded into the stream as they
+        // arrive — no per-batch connection overhead.
+        let (stream_tx, stream_rx) = tokio::sync::mpsc::channel::<TelemetryBatch>(256);
+        let batch_stream = tokio_stream::wrappers::ReceiverStream::new(stream_rx);
+
+        // Spawn the RPC call — it reads from batch_stream until stream_tx is dropped.
+        let rpc_handle = tokio::spawn({
+            let mut c = client.clone();
+            async move { c.stream_telemetry(batch_stream).await }
+        });
+
         loop {
             let batch = match batch_rx.recv().await {
                 Some(b) => b,
                 None => {
                     info!("Batch channel closed, shutting down transport...");
+                    drop(stream_tx);
+                    let _ = rpc_handle.await;
                     wal_tx.send(WalCmd::Shutdown).await.ok();
                     return Ok(());
                 }
             };
 
-            let stream = tokio_stream::iter(std::iter::once(batch));
-            match client.stream_telemetry(stream).await {
-                Ok(resp) => {
-                    let ack = resp.into_inner();
-                    debug!("Gateway ACK: {} batches, {} samples", ack.batches_received, ack.samples_received);
-                    if let Some(r) = &config.wal_depth_reporter {
-                        r.store(0, Ordering::Relaxed);
-                    }
-                }
-                Err(e) => {
-                    warn!("Gateway send failed (error={e:#}), reconnecting...");
-                    continue 'outer;
-                }
+            // Forward batch into the persistent stream
+            if stream_tx.send(batch).await.is_err() {
+                // stream_rx dropped — RPC ended (gateway closed or error)
+                warn!("Gateway stream closed, reconnecting...");
+                continue 'outer;
+            }
+
+            if let Some(r) = &config.wal_depth_reporter {
+                r.store(0, Ordering::Relaxed);
             }
         }
     }
