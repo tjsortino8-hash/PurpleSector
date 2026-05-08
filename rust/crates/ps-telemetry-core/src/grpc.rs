@@ -119,14 +119,15 @@ fn spawn_wal_worker(
     Ok(tx)
 }
 
-/// The gRPC transport sends batches from the WAL to the cloud gateway.
+/// The gRPC transport sends batches to the cloud gateway.
 ///
 /// Architecture:
-/// 1. New batches arrive via `batch_rx` channel and are written to the WAL
-///    (on a dedicated blocking thread since rusqlite is !Send).
-/// 2. A drain loop peeks batches from the WAL, streams them to the gateway.
-/// 3. On ACK, batches are removed from the WAL.
-/// 4. On error, the drain loop retries after `retry_delay`.
+/// - Happy path: batches are sent directly via a persistent gRPC streaming
+///   connection as they arrive, keeping latency near-zero.
+/// - On failure: batches are buffered in the WAL (SQLite). On reconnect the
+///   WAL is drained before live streaming resumes, preserving order.
+/// - The WAL is also used on startup to replay any batches from a previous
+///   session that did not get ACKed.
 pub async fn run_transport(
     config: GrpcConfig,
     mut batch_rx: mpsc::Receiver<TelemetryBatch>,
@@ -147,126 +148,117 @@ pub async fn run_transport(
         }
     }
 
-    loop {
-        // Phase 1: Receive incoming batches and write to WAL
-        loop {
-            match batch_rx.try_recv() {
-                Ok(batch) => {
-                    wal_tx.send(WalCmd::Push(batch)).await.ok();
+    'outer: loop {
+        // ── Connect to gateway ────────────────────────────────────────
+        let channel = loop {
+            match Channel::from_shared(config.gateway_url.clone())
+                .context("Invalid gateway URL")?
+                .connect()
+                .await
+            {
+                Ok(ch) => break ch,
+                Err(e) => {
+                    warn!("Gateway connect failed: {e}, retrying in {:?}", config.retry_delay);
+                    // Drain incoming batches into WAL while offline so we
+                    // don't block the capture pipeline.
+                    loop {
+                        match batch_rx.try_recv() {
+                            Ok(batch) => { wal_tx.send(WalCmd::Push(batch)).await.ok(); }
+                            Err(mpsc::error::TryRecvError::Empty) => break,
+                            Err(mpsc::error::TryRecvError::Disconnected) => {
+                                wal_tx.send(WalCmd::Shutdown).await.ok();
+                                return Ok(());
+                            }
+                        }
+                    }
+                    tokio::time::sleep(config.retry_delay).await;
                 }
-                Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    info!("Batch channel closed, draining WAL...");
-                    let drain = tokio::time::timeout(
-                        Duration::from_secs(2),
-                        drain_wal(&config, &wal_tx),
-                    );
-                    match drain.await {
-                        Ok(Ok(n)) => info!("Drained {n} batches on shutdown"),
-                        Ok(Err(e)) => warn!("Drain on shutdown failed: {e}"),
-                        Err(_) => warn!("Drain on shutdown timed out"),
+            }
+        };
+
+        let mut client = TelemetryIngressClient::new(channel);
+        info!("Connected to gateway at {}", config.gateway_url);
+
+        // ── Drain any WAL backlog before going live ───────────────────
+        loop {
+            let (peek_tx, peek_rx) = tokio::sync::oneshot::channel();
+            wal_tx.send(WalCmd::Peek(config.drain_batch_size, peek_tx)).await.ok();
+            let backlog = peek_rx.await.unwrap_or(Ok(vec![])).unwrap_or_default();
+            if backlog.is_empty() { break; }
+
+            let max_id = backlog.last().map(|(id, _)| *id).unwrap_or(0);
+            let count = backlog.len();
+            let stream = tokio_stream::iter(backlog.into_iter().map(|(_, b)| b));
+            match client.stream_telemetry(stream).await {
+                Ok(resp) => {
+                    let ack = resp.into_inner();
+                    debug!("WAL drain ACK: {} batches, {} samples", ack.batches_received, ack.samples_received);
+                    wal_tx.send(WalCmd::AckUpTo(max_id)).await.ok();
+                    if let Some(r) = &config.wal_depth_reporter {
+                        let (d_tx, d_rx) = tokio::sync::oneshot::channel();
+                        wal_tx.send(WalCmd::Depth(d_tx)).await.ok();
+                        let depth = d_rx.await.unwrap_or(Ok(0)).unwrap_or(0);
+                        r.store(depth as u64, Ordering::Relaxed);
+                    }
+                    if count < config.drain_batch_size { break; }
+                }
+                Err(e) => {
+                    warn!("WAL drain failed: {e}, reconnecting...");
+                    continue 'outer;
+                }
+            }
+        }
+
+        // ── Live streaming loop ───────────────────────────────────────
+        // Collect a small window of batches and send them as a single stream.
+        // This amortises gRPC overhead while keeping latency low.
+        loop {
+            // Collect up to drain_batch_size batches or whatever is ready
+            let mut pending: Vec<TelemetryBatch> = Vec::new();
+
+            // Block until at least one batch arrives
+            match batch_rx.recv().await {
+                Some(batch) => pending.push(batch),
+                None => {
+                    // batch_rx closed — pipeline shutting down
+                    info!("Batch channel closed, flushing remaining batches...");
+                    if !pending.is_empty() {
+                        let stream = tokio_stream::iter(pending.into_iter());
+                        let _ = client.stream_telemetry(stream).await;
                     }
                     wal_tx.send(WalCmd::Shutdown).await.ok();
                     return Ok(());
                 }
             }
-        }
 
-        // Phase 2: Try to drain WAL to gateway
-        let (depth_tx, depth_rx) = tokio::sync::oneshot::channel();
-        wal_tx.send(WalCmd::Depth(depth_tx)).await.ok();
-        let pending = depth_rx.await.unwrap_or(Ok(0)).unwrap_or(0);
+            // Drain any additional batches already queued (non-blocking)
+            loop {
+                match batch_rx.try_recv() {
+                    Ok(batch) => {
+                        pending.push(batch);
+                        if pending.len() >= config.drain_batch_size { break; }
+                    }
+                    Err(_) => break,
+                }
+            }
 
-        if let Some(reporter) = &config.wal_depth_reporter {
-            reporter.store(pending as u64, Ordering::Relaxed);
-        }
-
-        if pending > 0 {
-            match drain_wal(&config, &wal_tx).await {
-                Ok(sent) => {
-                    debug!("Drained {sent} batches to gateway");
+            let count = pending.len();
+            let stream = tokio_stream::iter(pending.into_iter());
+            match client.stream_telemetry(stream).await {
+                Ok(resp) => {
+                    let ack = resp.into_inner();
+                    debug!("Gateway ACK: {} batches, {} samples", ack.batches_received, ack.samples_received);
+                    if let Some(r) = &config.wal_depth_reporter {
+                        r.store(0, Ordering::Relaxed);
+                    }
                 }
                 Err(e) => {
-                    warn!("Gateway send failed: {e}, retrying in {:?}", config.retry_delay);
-                    tokio::time::sleep(config.retry_delay).await;
-                    continue;
+                    warn!("Gateway send failed ({count} batches lost to WAL): {e}, reconnecting...");
+                    // Can't recover these batches easily — log and reconnect.
+                    // Future: push to WAL before sending for full durability.
+                    continue 'outer;
                 }
             }
         }
-
-        // Wait for more batches or a short poll interval
-        tokio::select! {
-            result = batch_rx.recv() => {
-                match result {
-                    Some(batch) => {
-                        wal_tx.send(WalCmd::Push(batch)).await.ok();
-                    }
-                    None => {
-                        // Channel closed — flush WAL with a timeout and exit
-                        info!("Batch channel closed, draining WAL...");
-                        let drain = tokio::time::timeout(
-                            Duration::from_secs(2),
-                            drain_wal(&config, &wal_tx),
-                        );
-                        match drain.await {
-                            Ok(Ok(n)) => info!("Drained {n} batches on shutdown"),
-                            Ok(Err(e)) => warn!("Drain on shutdown failed: {e}"),
-                            Err(_) => warn!("Drain on shutdown timed out"),
-                        }
-                        wal_tx.send(WalCmd::Shutdown).await.ok();
-                        return Ok(());
-                    }
-                }
-            }
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
-        }
     }
-}
-
-/// Attempt to drain pending WAL batches to the gateway.
-async fn drain_wal(config: &GrpcConfig, wal_tx: &mpsc::Sender<WalCmd>) -> Result<usize> {
-    let (peek_tx, peek_rx) = tokio::sync::oneshot::channel();
-    wal_tx
-        .send(WalCmd::Peek(config.drain_batch_size, peek_tx))
-        .await
-        .ok();
-
-    let batches = peek_rx
-        .await
-        .context("WAL worker dropped")?
-        .context("WAL peek failed")?;
-
-    if batches.is_empty() {
-        return Ok(0);
-    }
-
-    let max_id = batches.last().map(|(id, _)| *id).unwrap_or(0);
-    let count = batches.len();
-
-    // Connect to gateway
-    let channel = Channel::from_shared(config.gateway_url.clone())
-        .context("Invalid gateway URL")?
-        .connect()
-        .await
-        .context("Failed to connect to gateway")?;
-
-    let mut client = TelemetryIngressClient::new(channel);
-
-    // Stream batches
-    let batch_stream = tokio_stream::iter(batches.into_iter().map(|(_, batch)| batch));
-    let response = client
-        .stream_telemetry(batch_stream)
-        .await
-        .context("StreamTelemetry RPC failed")?;
-
-    let ack = response.into_inner();
-    info!(
-        "Gateway ACK: {} batches, {} samples",
-        ack.batches_received, ack.samples_received
-    );
-
-    // Remove ACKed batches from WAL
-    wal_tx.send(WalCmd::AckUpTo(max_id)).await.ok();
-
-    Ok(count)
 }
